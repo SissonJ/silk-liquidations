@@ -86,10 +86,6 @@ async function main() {
   let results: Results = JSON.parse(resultsUnparsed);
 
   const now = new Date();
-  const start = results.start ?? now.getTime();
-  if(results.start === undefined) {
-    results.start = now.getTime();
-  }
 
   const index = results.contractsIndex ?? 0;
   if(results.contractsIndex === undefined) {
@@ -100,12 +96,13 @@ async function main() {
     results.contractsIndex += 1;
   }
 
- if ((now.getTime() - start > CONSTANTS.STATUS_REPORT_INTERVAL 
-    && (now.getTime() - start) % CONSTANTS.STATUS_REPORT_INTERVAL < CONSTANTS.THREE_SECONDS) 
-    || now.getTime() - start < CONSTANTS.INITIAL_REPORT_THRESHOLD
-  ) {
+ if (results.start === undefined ||  now.getTime() - (results.lastUpdate ?? 0) > CONSTANTS.ONE_HOUR * 2) {
+   if(results.start === undefined) {
+     results.start = now.getTime();
+   }
+    results.lastUpdate = now.getTime();
     logger.info(
-      `Bot running for ${Math.floor((now.getTime() - start) / CONSTANTS.ONE_HOUR)} hours` +
+      `Bot running for ${Math.floor((now.getTime() - results.start) / CONSTANTS.ONE_HOUR)} hours` +
       `  Total Attempts: ${results.totalAttempts}` +
       `  Successful: ${results.successfulLiquidations}` +
       `  Failed: ${results.failedLiquidations}` +
@@ -132,11 +129,14 @@ async function main() {
     }
   };
 
+  const beforeQuery = new Date().getTime();
   const response = await client.query.compute.queryContract({
     contract_address: process.env.BATCH_QUERY_CONTRACT!,
     code_hash: process.env.BATCH_QUERY_HASH,
     query: queryMsg,
   }) as BatchQueryResponse;
+  const queryLength = (new Date().getTime() - beforeQuery) / 1000;
+  results.queryLength = results.queryLength ? (results.queryLength + queryLength) / 2 : queryLength;
 
   const liquidatablePositions = response.batch.responses.reduce((prev: {position_id: string, vault_id: string}[], curr) => { 
     if(curr.response.response) {

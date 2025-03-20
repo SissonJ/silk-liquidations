@@ -15,7 +15,8 @@ export type BatchQueryResponse = {
 }
 
 export type Results = {
-  start: number,
+  start?: number,
+  lastUpdate?: number,
   contractsIndex: number,
   totalAttempts: number,
   successfulLiquidations: number,
