@@ -178,6 +178,12 @@ async function main() {
         feeDenom: CONSTANTS.FEE_DENOM,
       },
     )
+    if(executeResponse?.transactionHash !== undefined) {
+      fs.appendFile('../transactions.txt', `${now.getTime()},${executeResponse.transactionHash},silk\n`, 
+        (err) => {
+          if (err) logger.error('Failed to append transaction hash', now, err);
+      });
+    }
   }
   if(executeResponse === null) {
     throw new Error(`Transaction not found ${results.txHash}`);
@@ -191,10 +197,6 @@ async function main() {
     }
     logger.info(JSON.stringify(executeResponse.jsonLog), now);
     results.txHash = undefined;
-    fs.appendFile('../transactions.txt', `${now.getTime()},${executeResponse.transactionHash},silk\n`, 
-      (err) => {
-        if (err) logger.error('Failed to append transaction hash', now, err);
-    });
   } else {
     results.failedLiquidations += 1;
     if(executeResponse.rawLog === undefined || executeResponse.rawLog.length === 0) {
