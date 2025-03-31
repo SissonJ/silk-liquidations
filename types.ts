@@ -21,7 +21,8 @@ export type Results = {
   totalAttempts: number,
   successfulLiquidations: number,
   failedLiquidations: number,
-  queryLength: number,
+  queryLength: number[],
+  queryErrors: number,
   txHash: string | undefined,
   contracts: {
     address: string,

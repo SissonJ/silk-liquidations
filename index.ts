@@ -100,15 +100,18 @@ async function main() {
    if(results.start === undefined) {
      results.start = now.getTime();
    }
+    const queryLength = results.queryLength.reduce((acc, curr) => acc + curr, 0) / results.queryLength.length;
     results.lastUpdate = now.getTime();
     logger.info(
       `Bot running for ${Math.floor((now.getTime() - results.start) / CONSTANTS.ONE_HOUR)} hours` +
       `  Total Attempts: ${results.totalAttempts}` +
       `  Successful: ${results.successfulLiquidations}` +
       `  Failed: ${results.failedLiquidations}` +
-      `  Average Query Length: ${results.queryLength?.toFixed(3)}`,
+      `  Queries Failed: ${results.queryErrors} ` +
+      `  Average Query Length: ${queryLength.toFixed(3)}`,
       now
     );
+    results.queryErrors = 0; // reset query errors after logging
   }
   const vaultContract = results.contracts[index];
 
@@ -130,13 +133,33 @@ async function main() {
   };
 
   const beforeQuery = new Date().getTime();
-  const response = await client.query.compute.queryContract({
-    contract_address: process.env.BATCH_QUERY_CONTRACT!,
-    code_hash: process.env.BATCH_QUERY_HASH,
-    query: queryMsg,
-  }) as BatchQueryResponse;
+  let response;
+  try {
+    response = await client.query.compute.queryContract({
+      contract_address: process.env.BATCH_QUERY_CONTRACT!,
+      code_hash: process.env.BATCH_QUERY_HASH,
+      query: queryMsg,
+    }) as BatchQueryResponse;
+  } catch (e: any) {
+    fs.writeFileSync('./results.txt', JSON.stringify(results, null, 2));
+    if(e.message.includes('invalid json response')) {
+      results.queryErrors += 1;
+      return;
+    }
+    throw new Error(e);
+  }
+
+  if(response === undefined) {
+    results.queryErrors += 1;
+    fs.writeFileSync('./results.txt', JSON.stringify(results, null, 2));
+    return;
+  }
   const queryLength = (new Date().getTime() - beforeQuery) / 1000;
-  results.queryLength = results.queryLength ? (results.queryLength + queryLength) / 2 : queryLength;
+  results.queryLength.push(queryLength);
+  if(results.queryLength.length > 100) {
+    // Keep the last 10 query lengths for average calculation
+    results.queryLength.shift();
+  }
 
   const liquidatablePositions = response.batch.responses.reduce((prev: {position_id: string, vault_id: string}[], curr) => { 
     if(curr.response.response) {
