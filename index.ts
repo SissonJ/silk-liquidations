@@ -238,4 +238,4 @@ async function main() {
   fs.writeFileSync('./results.txt', JSON.stringify(results, null, 2));
 }
 
-main().catch((error:any) => {logger.error(error?.message, new Date());});
+main().catch((error:any) => {logger.error(JSON.stringify(error?.message), new Date());});
