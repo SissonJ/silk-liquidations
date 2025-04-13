@@ -19,6 +19,7 @@ const CONSTANTS = {
   
   // Transaction settings
   GAS_LIMIT: 1_500_000,
+  GAS_LIMIT_WITH_STABILITY_POOL: 2_500_000,
   FEE_DENOM: 'uscrt',
   
   // Time format settings
@@ -81,6 +82,7 @@ async function main() {
   if (!fs.existsSync('./results.txt')) {
     throw new Error("results.txt file not found");
   }
+  let isUsingStabilityPool = process.env.IS_USING_STABILITY_POOL === 'true';
 
   const resultsUnparsed = fs.readFileSync('./results.txt', 'utf-8');
   let results: Results = JSON.parse(resultsUnparsed);
@@ -117,7 +119,7 @@ async function main() {
 
   const queryMsg = {
     batch: {
-      queries: vaultContract.vault_ids.map((vaultId) => ({
+      queries: [ ...vaultContract.vault_ids.map((vaultId) => ({
         id: encodeJsonToB64(`${vaultId}`),
         contract: {
           address: vaultContract.address,
@@ -129,8 +131,38 @@ async function main() {
           }
         }),
       })),
+      ] as any[],
     }
   };
+
+  if(isUsingStabilityPool) {
+    queryMsg.batch.queries.push(...[
+      {
+        id: encodeJsonToB64('user_position'),
+        contract: {
+          address: process.env.MONEY_MARKET_ADDRESS,
+          code_hash: process.env.MONEY_MARKET_CODE_HASH,
+        },
+        query: encodeJsonToB64({ 
+          user_position: { 
+            authentication: { 
+              permit: JSON.parse(
+                process.env.SHADE_MASTER_PERMIT!
+              ) 
+            } 
+          } 
+        }),
+      },
+      {
+        id: encodeJsonToB64('oracle'),
+        contract: {
+          address: process.env.ORACLE_ADDRESS,
+          code_hash: process.env.ORACLE_CODE_HASH,
+        },
+        query: encodeJsonToB64({ get_price:{ key: process.env.ORACLE_KEY } }),
+      }
+    ]);
+  }
 
   const beforeQuery = new Date().getTime();
   let response;
@@ -161,10 +193,26 @@ async function main() {
     results.queryLength.shift();
   }
 
+  let borrowAmount = 0;
+  let borrowableAmount = 0;
+  let silkPrice = 0;
   const liquidatablePositions = response.batch.responses.reduce((prev: {position_id: string, vault_id: string}[], curr) => { 
     if(curr.response.response) {
       const responseData = decodeB64ToJson(curr.response.response);
       const vaultId = decodeB64ToJson(curr.id);
+      if(vaultId === 'user_position') {
+        borrowAmount = Number(responseData.total_principal_value) + Number(responseData.total_interest_accrued_value);
+        borrowableAmount = (Number(responseData.max_borrow_value) * 0.98) - borrowAmount;
+        if(borrowableAmount < 0) {
+          borrowableAmount = 0;
+          isUsingStabilityPool = false;
+        }
+        return prev;
+      }
+      if(vaultId === 'oracle') {
+        silkPrice = Number(responseData.data.rate / 10**18);
+        return prev;
+      }
       if(responseData.positions && responseData.positions.length > 0) {
         return [...prev, ...responseData.positions.map((pos: any) => ({
           position_id: pos.position_id,
@@ -174,6 +222,9 @@ async function main() {
     }
     return prev;
   }, []);
+
+  const borrowCap = Math.floor(((borrowableAmount * 0.98) / silkPrice) 
+    * 10**Number(6));
 
   if(liquidatablePositions.length === 0 && results.txHash === undefined) {
     fs.writeFileSync('./results.txt', JSON.stringify(results, null, 2));
@@ -185,9 +236,10 @@ async function main() {
   if(results.txHash) {
     executeResponse = await client.query.getTx(results.txHash);
   } else {
-    logger.info(`ATTEMPTING - id: ${liquidatable.position_id} routes: ${liquidatable.vault_id}`, now);
+    logger.info(`ATTEMPTING - position id: ${liquidatable.position_id} vault id: ${liquidatable.vault_id}`, now);
     results.totalAttempts += 1;
-    executeResponse = await client.tx.broadcast([new MsgExecuteContract({ 
+    let msgs: MsgExecuteContract<any>[] = [
+      new MsgExecuteContract({ 
         sender: client.address, 
         contract_address: vaultContract.address,
         code_hash: vaultContract.code_hash,
@@ -195,9 +247,41 @@ async function main() {
            liquidate: liquidatable, 
         }, 
         sent_funds: [],
-      })],
+      })
+    ];
+    if(isUsingStabilityPool) {
+      msgs = [
+        new MsgExecuteContract({ 
+          sender: client.address, 
+          contract_address: process.env.MONEY_MARKET_ADDRESS!,
+          code_hash: process.env.MONEY_MARKET_CODE_HASH!,
+          msg: { 
+            borrow:{
+              token: process.env.SILK_TOKEN_ADDRESS, 
+              amount: borrowCap.toFixed(0), 
+            } 
+          }, 
+          sent_funds: [],
+        }),
+        new MsgExecuteContract({ 
+          sender: client.address, 
+          contract_address: process.env.SILK_TOKEN_ADDRESS!,
+          code_hash: process.env.SILK_TOKEN_CODE_HASH!,
+          msg: {
+            send: {
+              recipient: process.env.STABILITY_POOL_ADDRESS,
+              recipient_code_hash: process.env.STABILITY_POOL_CODE_HASH,
+              amount: borrowCap.toFixed(0),
+              msg: encodeJsonToB64({deposit_silk:{}})
+            }
+          }, 
+          sent_funds: [],
+        }),
+      ].concat(msgs);
+    }
+    executeResponse = await client.tx.broadcast(msgs,
       {
-        gasLimit: CONSTANTS.GAS_LIMIT,
+        gasLimit: !isUsingStabilityPool ? CONSTANTS.GAS_LIMIT : 2_500_000,
         feeDenom: CONSTANTS.FEE_DENOM,
       },
     )
