@@ -19,6 +19,7 @@ const CONSTANTS = {
   
   // Transaction settings
   GAS_LIMIT: 1_500_000,
+  GAS_LIMIT_WITH_STABILITY_POOL: 2_500_000,
   FEE_DENOM: 'uscrt',
   
   // Time format settings
@@ -81,7 +82,7 @@ async function main() {
   if (!fs.existsSync('./results.txt')) {
     throw new Error("results.txt file not found");
   }
-  const isUsingStabilityPool = process.env.IS_USING_STABILITY_POOL === 'true';
+  let isUsingStabilityPool = process.env.IS_USING_STABILITY_POOL === 'true';
 
   const resultsUnparsed = fs.readFileSync('./results.txt', 'utf-8');
   let results: Results = JSON.parse(resultsUnparsed);
@@ -118,7 +119,7 @@ async function main() {
 
   const queryMsg = {
     batch: {
-      queries: [ /*...vaultContract.vault_ids.map((vaultId) => ({
+      queries: [ ...vaultContract.vault_ids.map((vaultId) => ({
         id: encodeJsonToB64(`${vaultId}`),
         contract: {
           address: vaultContract.address,
@@ -129,7 +130,7 @@ async function main() {
             vault_id:String(vaultId)
           }
         }),
-      })),*/
+      })),
       ] as any[],
     }
   };
@@ -193,13 +194,19 @@ async function main() {
   }
 
   let borrowAmount = 0;
+  let borrowableAmount = 0;
   let silkPrice = 0;
   const liquidatablePositions = response.batch.responses.reduce((prev: {position_id: string, vault_id: string}[], curr) => { 
     if(curr.response.response) {
       const responseData = decodeB64ToJson(curr.response.response);
       const vaultId = decodeB64ToJson(curr.id);
       if(vaultId === 'user_position') {
-        borrowAmount = Number(responseData.max_borrow_value) * 0.98;
+        borrowAmount = Number(responseData.total_principal_value) + Number(responseData.total_interest_accrued_value);
+        borrowableAmount = (Number(responseData.max_borrow_value) * 0.98) - borrowAmount;
+        if(borrowableAmount < 0) {
+          borrowableAmount = 0;
+          isUsingStabilityPool = false;
+        }
         return prev;
       }
       if(vaultId === 'oracle') {
@@ -216,7 +223,7 @@ async function main() {
     return prev;
   }, []);
 
-  const borrowCap = Math.floor(((borrowAmount * 0.98) / silkPrice) 
+  const borrowCap = Math.floor(((borrowableAmount * 0.98) / silkPrice) 
     * 10**Number(6));
 
   if(liquidatablePositions.length === 0 && results.txHash === undefined) {
@@ -229,7 +236,7 @@ async function main() {
   if(results.txHash) {
     executeResponse = await client.query.getTx(results.txHash);
   } else {
-    logger.info(`ATTEMPTING - id: ${liquidatable.position_id} routes: ${liquidatable.vault_id}`, now);
+    logger.info(`ATTEMPTING - position id: ${liquidatable.position_id} vault id: ${liquidatable.vault_id}`, now);
     results.totalAttempts += 1;
     let msgs: MsgExecuteContract<any>[] = [
       new MsgExecuteContract({ 
@@ -274,7 +281,7 @@ async function main() {
     }
     executeResponse = await client.tx.broadcast(msgs,
       {
-        gasLimit: !isUsingStabilityPool ? CONSTANTS.GAS_LIMIT : 5_000_000,
+        gasLimit: !isUsingStabilityPool ? CONSTANTS.GAS_LIMIT : 2_500_000,
         feeDenom: CONSTANTS.FEE_DENOM,
       },
     )
