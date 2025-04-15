@@ -286,7 +286,7 @@ async function main() {
       },
     )
     if(executeResponse?.transactionHash !== undefined) {
-      fs.appendFile('../transactions.txt', `${now.getTime()},${executeResponse.transactionHash},silk\n`, 
+      fs.appendFile('../transactions.txt', `${now.getTime()},${executeResponse.transactionHash},silk,${borrowCap.toFixed(0)}\n`, 
         (err) => {
           if (err) logger.error('Failed to append transaction hash', now, err);
       });
